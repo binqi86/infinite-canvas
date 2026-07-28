@@ -105,6 +105,14 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
         // 5. 写回 IndexedDB
         const setRequest = store.put(value, 'infinite-canvas:canvas_store');
         setRequest.onsuccess = function() {
+          // 如果是新建画布且传入了 projectId，保存绑定关系
+          if (!canvasId && projectId) {
+            fetch(apiBase + '/api/import/bind', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
+            }).catch(function() {});
+          }
           window.location.replace('/canvas/' + newId);
         };
         setRequest.onerror = function() {
