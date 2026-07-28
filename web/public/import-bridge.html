@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>导入素材到画布</title>
+<style>
+body { margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fafafa; color: #333; }
+.loading { text-align: center; }
+.spinner { width: 32px; height: 32px; border: 3px solid #e0e0e0; border-top-color: #1677ff; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 16px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.error { color: #ff4d4f; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="loading" id="root">
+  <div class="spinner"></div>
+  <div>正在导入素材到画布...</div>
+</div>
+<script>
+(function() {
+  'use strict';
+
+  const root = document.getElementById('root');
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('token');
+  const apiBase = params.get('api');
+  const projectId = params.get('projectId');
+  const canvasId = params.get('canvasId');
+
+  if (!token || !apiBase) {
+    root.innerHTML = '<div class="loading"><div class="error">缺少 token 或 API 地址参数</div></div>';
+    return;
+  }
+
+  function nanoid(size) {
+    size = size || 21;
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_-';
+    let id = '';
+    const bytes = new Uint8Array(size);
+    crypto.getRandomValues(bytes);
+    for (let i = 0; i < size; i++) {
+      id += chars[bytes[i] % 64];
+    }
+    return id;
+  }
+
+  async function run() {
+    // 1. 获取导入数据
+    const res = await fetch(apiBase + '/api/import/get?token=' + encodeURIComponent(token));
+    const data = await res.json();
+    if (!data.success || !data.data) {
+      root.innerHTML = '<div class="loading"><div class="error">导入数据不存在或已过期</div></div>';
+      return;
+    }
+
+    const { nodes, connections } = data.data;
+
+    // 2. 打开 IndexedDB (与 canvas store 相同的配置: name=infinite-canvas, store=app_state)
+    const dbRequest = indexedDB.open('infinite-canvas', 1);
+    dbRequest.onupgradeneeded = function(e) {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('app_state')) {
+        db.createObjectStore('app_state');
+      }
+    };
+
+    dbRequest.onsuccess = function(e) {
+      const db = e.target.result;
+      const tx = db.transaction('app_state', 'readwrite');
+      const store = tx.objectStore('app_state');
+
+      // 3. 读取现有项目
+      const getRequest = store.get('infinite-canvas:canvas_store');
+      getRequest.onsuccess = function() {
+        const existing = getRequest.result;
+        let projects = [];
+        if (existing) {
+          try {
+            const parsed = JSON.parse(existing);
+            projects = parsed.state?.projects || [];
+          } catch {}
+        }
+
+        let newId;
+        if (canvasId) {
+          // 更新已有画布: 替换节点和连线，保留其他元数据
+          const idx = projects.findIndex(p => p.id === canvasId);
+          if (idx >= 0) {
+            projects[idx].nodes = nodes || [];
+            projects[idx].connections = connections || [];
+            projects[idx].updatedAt = new Date().toISOString();
+            newId = canvasId;
+          } else {
+            // canvasId 指定的项目不存在，回退到新建
+            newId = createNewProject(projects, nodes, connections);
+          }
+        } else {
+          // 新建画布
+          newId = createNewProject(projects, nodes, connections);
+        }
+
+        const value = JSON.stringify({ state: { projects: projects }, version: 0 });
+
+        // 5. 写回 IndexedDB
+        const setRequest = store.put(value, 'infinite-canvas:canvas_store');
+        setRequest.onsuccess = function() {
+          window.location.replace('/canvas/' + newId);
+        };
+        setRequest.onerror = function() {
+          root.innerHTML = '<div class="loading"><div class="error">保存画布数据失败</div></div>';
+        };
+      };
+      getRequest.onerror = function() {
+        root.innerHTML = '<div class="loading"><div class="error">读取画布数据失败</div></div>';
+      };
+    };
+
+    dbRequest.onerror = function() {
+      root.innerHTML = '<div class="loading"><div class="error">打开画布数据库失败</div></div>';
+    };
+  }
+
+  function createNewProject(projects, nodes, connections) {
+    const newId = nanoid();
+    const now = new Date().toISOString();
+    projects.unshift({
+      id: newId,
+      title: '画布导入',
+      createdAt: now,
+      updatedAt: now,
+      nodes: nodes || [],
+      connections: connections || [],
+      chatSessions: [],
+      activeChatId: null,
+      backgroundMode: 'lines',
+      showImageInfo: false,
+      viewport: { x: 0, y: 0, k: 1 },
+    });
+    return newId;
+  }
+
+  run().catch(function(err) {
+    root.innerHTML = '<div class="loading"><div class="error">导入失败: ' + (err.message || '未知错误') + '</div></div>';
+  });
+})();
+</script>
+</body>
+</html>
