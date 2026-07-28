@@ -46,8 +46,6 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
   }
 
   var STORE_KEY = 'infinite-canvas:canvas_store';
-  var DB_NAME = 'infinite-canvas';
-  var STORE_NAME = 'app_state';
 
   function processProjects(projects, nodes, connections) {
     var newId;
@@ -86,109 +84,6 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     return newId;
   }
 
-  // 与 localforage 完全一致的存储方式:
-  //   setItem: store.put(value, key)
-  //   getItem: store.get(key)
-  // 参考: node_modules/localforage/src/drivers/indexeddb.js
-
-  function openDB() {
-    return new Promise(function(resolve, reject) {
-      var req = indexedDB.open(DB_NAME);
-      req.onupgradeneeded = function(e) {
-        var db = e.target.result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          db.createObjectStore(STORE_NAME);
-        }
-      };
-      req.onsuccess = function(e) {
-        var db = e.target.result;
-        // 如果 store 不存在（数据库由旧版本或不同代码创建），需要升级
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          db.close();
-          var upReq = indexedDB.open(DB_NAME, db.version + 1);
-          upReq.onupgradeneeded = function(ev) {
-            ev.target.result.createObjectStore(STORE_NAME);
-          };
-          upReq.onsuccess = function(ev) { resolve(ev.target.result); };
-          upReq.onerror = function() { reject(new Error('upgrade failed')); };
-        } else {
-          resolve(db);
-        }
-      };
-      req.onerror = function(e) {
-        reject(e.target.error || new Error('open failed'));
-      };
-    });
-  }
-
-  function getFromDB(db) {
-    return new Promise(function(resolve, reject) {
-      var tx = db.transaction(STORE_NAME, 'readonly');
-      var store = tx.objectStore(STORE_NAME);
-      var req = store.get(STORE_KEY);
-      req.onsuccess = function() { resolve(req.result); };
-      req.onerror = function() { reject(req.error); };
-    });
-  }
-
-  function putToDB(db, value) {
-    return new Promise(function(resolve, reject) {
-      var tx = db.transaction(STORE_NAME, 'readwrite');
-      var store = tx.objectStore(STORE_NAME);
-      var req = store.put(value, STORE_KEY);
-      req.onsuccess = function() { resolve(); };
-      req.onerror = function() { reject(req.error); };
-    });
-  }
-
-  function saveViaIndexedDB(nodes, connections) {
-    return openDB().then(function(db) {
-      return getFromDB(db).then(function(existing) {
-        var projects = [];
-        if (existing) {
-          try {
-            var parsed = typeof existing === 'string' ? JSON.parse(existing) : existing;
-            projects = parsed.state?.projects || [];
-          } catch(e) {}
-        }
-        var newId = processProjects(projects, nodes, connections);
-        var value = JSON.stringify({ state: { projects: projects }, version: 0 });
-
-        // 同步写入 localStorage 兜底
-        try { localStorage.setItem(STORE_KEY, value); } catch(e) {}
-
-        return putToDB(db, value).then(function() {
-          return newId;
-        });
-      });
-    });
-  }
-
-  function saveViaLocalStorage(nodes, connections) {
-    var projects = [];
-    try {
-      var raw = localStorage.getItem(STORE_KEY);
-      if (raw) {
-        var parsed = JSON.parse(raw);
-        projects = parsed.state?.projects || [];
-      }
-    } catch(e) {}
-    var newId = processProjects(projects, nodes, connections);
-    var value = JSON.stringify({ state: { projects: projects }, version: 0 });
-    try { localStorage.setItem(STORE_KEY, value); } catch(e) {}
-    return newId;
-  }
-
-  function saveBinding(newId) {
-    if (!canvasId && projectId) {
-      fetch(apiBase + '/api/import/bind', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
-      }).catch(function() {});
-    }
-  }
-
   async function run() {
     var res = await fetch(apiBase + '/api/import/get?token=' + encodeURIComponent(token));
     var data = await res.json();
@@ -200,19 +95,37 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     var nodes = data.data.nodes || [];
     var connections = data.data.connections || [];
 
-    // 先写 localStorage 兜底
-    var lsId = saveViaLocalStorage(nodes, connections);
-
-    // 再写 IndexedDB（与 localforage 完全一致的格式）
+    // 读取/写入 localStorage（canvas store 已加兜底读取）
+    var projects = [];
     try {
-      var idbId = await saveViaIndexedDB(nodes, connections);
-      saveBinding(idbId);
-      window.location.replace('/canvas/' + idbId);
-    } catch(e) {
-      // IndexedDB 失败，用 localStorage 的 ID
-      saveBinding(lsId);
-      window.location.replace('/canvas/' + lsId);
+      var raw = localStorage.getItem(STORE_KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        projects = parsed.state?.projects || [];
+      }
+    } catch(e) {}
+
+    var newId = processProjects(projects, nodes, connections);
+    var value = JSON.stringify({ state: { projects: projects }, version: 0 });
+    try { localStorage.setItem(STORE_KEY, value); } catch(e) {}
+
+    // 保存绑定
+    if (!canvasId && projectId) {
+      fetch(apiBase + '/api/import/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
+      }).catch(function() {});
     }
+
+    // 通知父窗口（CanvasProxy.vue）跳转到画布
+    window.parent.postMessage({
+      type: 'canvas-import-done',
+      projectId: projectId,
+      canvasId: newId,
+    }, '*');
+
+    root.innerHTML = '<div class="loading"><div class="spinner"></div><div>导入完成，正在跳转...</div></div>';
   }
 
   run().catch(function(err) {
