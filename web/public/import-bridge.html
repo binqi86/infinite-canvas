@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>导入素材到画布</title>
+<script src="https://cdn.jsdelivr.net/npm/localforage@1.10.0/dist/localforage.min.js"></script>
 <style>
 body { margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fafafa; color: #333; }
 .loading { text-align: center; }
@@ -47,27 +48,11 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
 
   const STORE_KEY = 'infinite-canvas:canvas_store';
 
-  // 读取已保存的项目列表（兼容 IndexedDB 和 localStorage）
-  function readProjects() {
-    // 先从 localStorage 读取（canvas store 有 fallback 到此）
-    try {
-      const ls = localStorage.getItem(STORE_KEY);
-      if (ls) {
-        const parsed = JSON.parse(ls);
-        if (parsed?.state?.projects) return parsed.state.projects;
-      }
-    } catch {}
-    return null;
-  }
-
-  function saveToStorage(projects) {
-    const value = JSON.stringify({ state: { projects: projects }, version: 0 });
-    // 同时写入 localStorage（canvas store 的 fallback）
-    try {
-      localStorage.setItem(STORE_KEY, value);
-    } catch {}
-    return value;
-  }
+  // 与 canvas store 一致的 localforage 配置
+  localforage.config({
+    name: 'infinite-canvas',
+    storeName: 'app_state',
+  });
 
   function processProjects(projects, nodes, connections) {
     let newId;
@@ -117,108 +102,37 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
 
     const { nodes, connections } = data.data;
 
-    // 2. 尝试从 localStorage 读取已有项目（IndexedDB 不可用时兜底）
-    let projects = readProjects() || [];
-
-    if (projects.length > 0) {
-      // localStorage 已有数据，直接操作
-      const newId = processProjects(projects, nodes, connections);
-      saveToStorage(projects);
-      // 新建画布时保存绑定
-      if (!canvasId && projectId) {
-        fetch(apiBase + '/api/import/bind', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
-        }).catch(function() {});
-      }
-      window.location.replace('/canvas/' + newId);
-      return;
-    }
-
-    // 3. localStorage 无数据，尝试 IndexedDB
+    // 2. 使用 localforage 读取/写入（与 canvas store 完全一致）
+    let raw;
     try {
-      const dbRequest = indexedDB.open('infinite-canvas', 1);
-      dbRequest.onupgradeneeded = function(e) {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains('app_state')) {
-          db.createObjectStore('app_state');
-        }
-      };
-
-      dbRequest.onsuccess = function(e) {
-        const db = e.target.result;
-        const tx = db.transaction('app_state', 'readwrite');
-        const store = tx.objectStore('app_state');
-        const getRequest = store.get(STORE_KEY);
-        getRequest.onsuccess = function() {
-          const existing = getRequest.result;
-          let projects = [];
-          if (existing) {
-            try {
-              const parsed = JSON.parse(existing);
-              projects = parsed.state?.projects || [];
-            } catch {}
-          }
-
-          const newId = processProjects(projects, nodes, connections);
-          const value = JSON.stringify({ state: { projects: projects }, version: 0 });
-          // 同步写入 localStorage 确保一致性
-          try { localStorage.setItem(STORE_KEY, value); } catch {}
-
-          const setRequest = store.put(value, STORE_KEY);
-          setRequest.onsuccess = function() {
-            if (!canvasId && projectId) {
-              fetch(apiBase + '/api/import/bind', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
-              }).catch(function() {});
-            }
-            window.location.replace('/canvas/' + newId);
-          };
-          setRequest.onerror = function() {
-            // IndexedDB 写入失败，用 localStorage 兜底
-            saveToStorage(projects);
-            if (!canvasId && projectId) {
-              fetch(apiBase + '/api/import/bind', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
-              }).catch(function() {});
-            }
-            window.location.replace('/canvas/' + newId);
-          };
-        };
-        getRequest.onerror = function() {
-          // IndexedDB 读取失败，用 localStorage 兜底
-          const newId = processProjects(projects, nodes, connections);
-          saveToStorage(projects);
-          if (!canvasId && projectId) {
-            fetch(apiBase + '/api/import/bind', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
-            }).catch(function() {});
-          }
-          window.location.replace('/canvas/' + newId);
-        };
-      };
-
-      dbRequest.onerror = function() {
-        // IndexedDB 完全不可用，回退到 localStorage
-        fallbackToLocalStorage(nodes, connections);
-      };
+      raw = await localforage.getItem(STORE_KEY);
     } catch (e) {
-      fallbackToLocalStorage(nodes, connections);
+      // localforage 内部 IndexedDB 失败，尝试 localStorage 兜底
+      try { raw = localStorage.getItem(STORE_KEY); } catch {}
     }
-  }
 
-  function fallbackToLocalStorage(nodes, connections) {
-    root.innerHTML = '<div class="loading"><div class="spinner"></div><div>使用 localStorage 模式导入...</div></div>';
-    let projects = readProjects() || [];
+    let projects = [];
+    if (raw) {
+      try {
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        projects = parsed.state?.projects || [];
+      } catch {}
+    }
+
     const newId = processProjects(projects, nodes, connections);
-    saveToStorage(projects);
+    const value = JSON.stringify({ state: { projects: projects }, version: 0 });
+
+    // 3. 通过 localforage 写入 IndexedDB（与 canvas store 同样的存储路径）
+    try {
+      await localforage.setItem(STORE_KEY, value);
+    } catch (e) {
+      // localforage 写入失败，兜底到 localStorage
+      try { localStorage.setItem(STORE_KEY, value); } catch {}
+    }
+    // 同步写入 localStorage 作为额外兜底
+    try { localStorage.setItem(STORE_KEY, value); } catch {}
+
+    // 4. 新建画布时保存绑定
     if (!canvasId && projectId) {
       fetch(apiBase + '/api/import/bind', {
         method: 'POST',
@@ -226,6 +140,7 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
         body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
       }).catch(function() {});
     }
+
     window.location.replace('/canvas/' + newId);
   }
 
