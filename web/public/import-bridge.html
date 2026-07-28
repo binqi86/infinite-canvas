@@ -45,88 +45,46 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     return id;
   }
 
-  async function run() {
-    // 1. 获取导入数据
-    const res = await fetch(apiBase + '/api/import/get?token=' + encodeURIComponent(token));
-    const data = await res.json();
-    if (!data.success || !data.data) {
-      root.innerHTML = '<div class="loading"><div class="error">导入数据不存在或已过期</div></div>';
-      return;
-    }
+  const STORE_KEY = 'infinite-canvas:canvas_store';
 
-    const { nodes, connections } = data.data;
-
-    // 2. 打开 IndexedDB (与 canvas store 相同的配置: name=infinite-canvas, store=app_state)
-    const dbRequest = indexedDB.open('infinite-canvas', 1);
-    dbRequest.onupgradeneeded = function(e) {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains('app_state')) {
-        db.createObjectStore('app_state');
+  // 读取已保存的项目列表（兼容 IndexedDB 和 localStorage）
+  function readProjects() {
+    // 先从 localStorage 读取（canvas store 有 fallback 到此）
+    try {
+      const ls = localStorage.getItem(STORE_KEY);
+      if (ls) {
+        const parsed = JSON.parse(ls);
+        if (parsed?.state?.projects) return parsed.state.projects;
       }
-    };
+    } catch {}
+    return null;
+  }
 
-    dbRequest.onsuccess = function(e) {
-      const db = e.target.result;
-      const tx = db.transaction('app_state', 'readwrite');
-      const store = tx.objectStore('app_state');
+  function saveToStorage(projects) {
+    const value = JSON.stringify({ state: { projects: projects }, version: 0 });
+    // 同时写入 localStorage（canvas store 的 fallback）
+    try {
+      localStorage.setItem(STORE_KEY, value);
+    } catch {}
+    return value;
+  }
 
-      // 3. 读取现有项目
-      const getRequest = store.get('infinite-canvas:canvas_store');
-      getRequest.onsuccess = function() {
-        const existing = getRequest.result;
-        let projects = [];
-        if (existing) {
-          try {
-            const parsed = JSON.parse(existing);
-            projects = parsed.state?.projects || [];
-          } catch {}
-        }
-
-        let newId;
-        if (canvasId) {
-          // 更新已有画布: 替换节点和连线，保留其他元数据
-          const idx = projects.findIndex(p => p.id === canvasId);
-          if (idx >= 0) {
-            projects[idx].nodes = nodes || [];
-            projects[idx].connections = connections || [];
-            projects[idx].updatedAt = new Date().toISOString();
-            newId = canvasId;
-          } else {
-            // canvasId 指定的项目不存在，回退到新建
-            newId = createNewProject(projects, nodes, connections);
-          }
-        } else {
-          // 新建画布
-          newId = createNewProject(projects, nodes, connections);
-        }
-
-        const value = JSON.stringify({ state: { projects: projects }, version: 0 });
-
-        // 5. 写回 IndexedDB
-        const setRequest = store.put(value, 'infinite-canvas:canvas_store');
-        setRequest.onsuccess = function() {
-          // 如果是新建画布且传入了 projectId，保存绑定关系
-          if (!canvasId && projectId) {
-            fetch(apiBase + '/api/import/bind', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
-            }).catch(function() {});
-          }
-          window.location.replace('/canvas/' + newId);
-        };
-        setRequest.onerror = function() {
-          root.innerHTML = '<div class="loading"><div class="error">保存画布数据失败</div></div>';
-        };
-      };
-      getRequest.onerror = function() {
-        root.innerHTML = '<div class="loading"><div class="error">读取画布数据失败</div></div>';
-      };
-    };
-
-    dbRequest.onerror = function() {
-      root.innerHTML = '<div class="loading"><div class="error">打开画布数据库失败</div></div>';
-    };
+  function processProjects(projects, nodes, connections) {
+    let newId;
+    if (canvasId) {
+      const idx = projects.findIndex(p => p.id === canvasId);
+      if (idx >= 0) {
+        projects[idx].nodes = nodes || [];
+        projects[idx].connections = connections || [];
+        projects[idx].updatedAt = new Date().toISOString();
+        newId = canvasId;
+      } else {
+        newId = createNewProject(projects, nodes, connections);
+      }
+    } else {
+      newId = createNewProject(projects, nodes, connections);
+    }
+    return newId;
   }
 
   function createNewProject(projects, nodes, connections) {
@@ -146,6 +104,129 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
       viewport: { x: 0, y: 0, k: 1 },
     });
     return newId;
+  }
+
+  async function run() {
+    // 1. 获取导入数据
+    const res = await fetch(apiBase + '/api/import/get?token=' + encodeURIComponent(token));
+    const data = await res.json();
+    if (!data.success || !data.data) {
+      root.innerHTML = '<div class="loading"><div class="error">导入数据不存在或已过期</div></div>';
+      return;
+    }
+
+    const { nodes, connections } = data.data;
+
+    // 2. 尝试从 localStorage 读取已有项目（IndexedDB 不可用时兜底）
+    let projects = readProjects() || [];
+
+    if (projects.length > 0) {
+      // localStorage 已有数据，直接操作
+      const newId = processProjects(projects, nodes, connections);
+      saveToStorage(projects);
+      // 新建画布时保存绑定
+      if (!canvasId && projectId) {
+        fetch(apiBase + '/api/import/bind', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
+        }).catch(function() {});
+      }
+      window.location.replace('/canvas/' + newId);
+      return;
+    }
+
+    // 3. localStorage 无数据，尝试 IndexedDB
+    try {
+      const dbRequest = indexedDB.open('infinite-canvas', 1);
+      dbRequest.onupgradeneeded = function(e) {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('app_state')) {
+          db.createObjectStore('app_state');
+        }
+      };
+
+      dbRequest.onsuccess = function(e) {
+        const db = e.target.result;
+        const tx = db.transaction('app_state', 'readwrite');
+        const store = tx.objectStore('app_state');
+        const getRequest = store.get(STORE_KEY);
+        getRequest.onsuccess = function() {
+          const existing = getRequest.result;
+          let projects = [];
+          if (existing) {
+            try {
+              const parsed = JSON.parse(existing);
+              projects = parsed.state?.projects || [];
+            } catch {}
+          }
+
+          const newId = processProjects(projects, nodes, connections);
+          const value = JSON.stringify({ state: { projects: projects }, version: 0 });
+          // 同步写入 localStorage 确保一致性
+          try { localStorage.setItem(STORE_KEY, value); } catch {}
+
+          const setRequest = store.put(value, STORE_KEY);
+          setRequest.onsuccess = function() {
+            if (!canvasId && projectId) {
+              fetch(apiBase + '/api/import/bind', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
+              }).catch(function() {});
+            }
+            window.location.replace('/canvas/' + newId);
+          };
+          setRequest.onerror = function() {
+            // IndexedDB 写入失败，用 localStorage 兜底
+            saveToStorage(projects);
+            if (!canvasId && projectId) {
+              fetch(apiBase + '/api/import/bind', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
+              }).catch(function() {});
+            }
+            window.location.replace('/canvas/' + newId);
+          };
+        };
+        getRequest.onerror = function() {
+          // IndexedDB 读取失败，用 localStorage 兜底
+          const newId = processProjects(projects, nodes, connections);
+          saveToStorage(projects);
+          if (!canvasId && projectId) {
+            fetch(apiBase + '/api/import/bind', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
+            }).catch(function() {});
+          }
+          window.location.replace('/canvas/' + newId);
+        };
+      };
+
+      dbRequest.onerror = function() {
+        // IndexedDB 完全不可用，回退到 localStorage
+        fallbackToLocalStorage(nodes, connections);
+      };
+    } catch (e) {
+      fallbackToLocalStorage(nodes, connections);
+    }
+  }
+
+  function fallbackToLocalStorage(nodes, connections) {
+    root.innerHTML = '<div class="loading"><div class="spinner"></div><div>使用 localStorage 模式导入...</div></div>';
+    let projects = readProjects() || [];
+    const newId = processProjects(projects, nodes, connections);
+    saveToStorage(projects);
+    if (!canvasId && projectId) {
+      fetch(apiBase + '/api/import/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
+      }).catch(function() {});
+    }
+    window.location.replace('/canvas/' + newId);
   }
 
   run().catch(function(err) {
