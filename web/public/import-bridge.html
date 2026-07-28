@@ -21,12 +21,12 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
 (function() {
   'use strict';
 
-  const root = document.getElementById('root');
-  const params = new URLSearchParams(window.location.search);
-  const token = params.get('token');
-  const apiBase = params.get('api');
-  const projectId = params.get('projectId');
-  const canvasId = params.get('canvasId');
+  var root = document.getElementById('root');
+  var params = new URLSearchParams(window.location.search);
+  var token = params.get('token');
+  var apiBase = params.get('api');
+  var projectId = params.get('projectId');
+  var canvasId = params.get('canvasId');
 
   if (!token || !apiBase) {
     root.innerHTML = '<div class="loading"><div class="error">缺少 token 或 API 地址参数</div></div>';
@@ -35,24 +35,24 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
 
   function nanoid(size) {
     size = size || 21;
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_-';
-    let id = '';
-    const bytes = new Uint8Array(size);
+    var chars = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_-';
+    var id = '';
+    var bytes = new Uint8Array(size);
     crypto.getRandomValues(bytes);
-    for (let i = 0; i < size; i++) {
+    for (var i = 0; i < size; i++) {
       id += chars[bytes[i] % 64];
     }
     return id;
   }
 
-  const STORE_KEY = 'infinite-canvas:canvas_store';
-  const DB_NAME = 'infinite-canvas';
-  const STORE_NAME = 'app_state';
+  var STORE_KEY = 'infinite-canvas:canvas_store';
+  var DB_NAME = 'infinite-canvas';
+  var STORE_NAME = 'app_state';
 
   function processProjects(projects, nodes, connections) {
-    let newId;
+    var newId;
     if (canvasId) {
-      const idx = projects.findIndex(p => p.id === canvasId);
+      var idx = projects.findIndex(function(p) { return p.id === canvasId; });
       if (idx >= 0) {
         projects[idx].nodes = nodes || [];
         projects[idx].connections = connections || [];
@@ -68,8 +68,8 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
   }
 
   function createNewProject(projects, nodes, connections) {
-    const newId = nanoid();
-    const now = new Date().toISOString();
+    var newId = nanoid();
+    var now = new Date().toISOString();
     projects.unshift({
       id: newId,
       title: '画布导入',
@@ -86,106 +86,85 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     return newId;
   }
 
-  // localforage 存储格式: {key: key, value: value}，通过 key 索引查询
-  // 见 localforage 源码: createObjectStore + createIndex('key', 'key', {unique: true})
-  function readFromIDB(store) {
-    return new Promise(function(resolve, reject) {
-      try {
-        var idx = store.index('key');
-        var req = idx.get(STORE_KEY);
-        req.onsuccess = function() { resolve(req.result ? req.result.value : null); };
-        req.onerror = function() { reject(req.error); };
-      } catch(e) {
-        // 索引不存在，直接按 key 读
-        var req = store.get(STORE_KEY);
-        req.onsuccess = function() { resolve(req.result); };
-        req.onerror = function() { reject(req.error); };
-      }
-    });
-  }
+  // 与 localforage 完全一致的存储方式:
+  //   setItem: store.put(value, key)
+  //   getItem: store.get(key)
+  // 参考: node_modules/localforage/src/drivers/indexeddb.js
 
-  function writeToIDB(store, value) {
-    return new Promise(function(resolve, reject) {
-      // 按 localforage 格式存储: {key: key, value: value}
-      var req = store.put({ key: STORE_KEY, value: value });
-      req.onsuccess = resolve;
-      req.onerror = function() { reject(req.error); };
-    });
-  }
-
-  function saveViaIndexedDB(nodes, connections) {
+  function openDB() {
     return new Promise(function(resolve, reject) {
       var req = indexedDB.open(DB_NAME);
       req.onupgradeneeded = function(e) {
         var db = e.target.result;
         if (!db.objectStoreNames.contains(STORE_NAME)) {
-          var os = db.createObjectStore(STORE_NAME, { keyPath: null, autoIncrement: false });
-          os.createIndex('key', 'key', { unique: true });
-          os.createIndex('value', 'value', { unique: false });
+          db.createObjectStore(STORE_NAME);
         }
       };
       req.onsuccess = function(e) {
         var db = e.target.result;
+        // 如果 store 不存在（数据库由旧版本或不同代码创建），需要升级
         if (!db.objectStoreNames.contains(STORE_NAME)) {
           db.close();
-          // 升级版本以创建 store
           var upReq = indexedDB.open(DB_NAME, db.version + 1);
           upReq.onupgradeneeded = function(ev) {
-            var upDb = ev.target.result;
-            var os = upDb.createObjectStore(STORE_NAME, { keyPath: null, autoIncrement: false });
-            os.createIndex('key', 'key', { unique: true });
-            os.createIndex('value', 'value', { unique: false });
+            ev.target.result.createObjectStore(STORE_NAME);
           };
-          upReq.onsuccess = function(ev) {
-            doIDBWrite(ev.target.result, nodes, connections).then(resolve).catch(reject);
-          };
+          upReq.onsuccess = function(ev) { resolve(ev.target.result); };
           upReq.onerror = function() { reject(new Error('upgrade failed')); };
-          return;
+        } else {
+          resolve(db);
         }
-        doIDBWrite(db, nodes, connections).then(resolve).catch(reject);
       };
-      req.onerror = function() { reject(new Error('open failed')); };
+      req.onerror = function(e) {
+        reject(e.target.error || new Error('open failed'));
+      };
     });
   }
 
-  function doIDBWrite(db, nodes, connections) {
+  function getFromDB(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction(STORE_NAME, 'readonly');
+      var store = tx.objectStore(STORE_NAME);
+      var req = store.get(STORE_KEY);
+      req.onsuccess = function() { resolve(req.result); };
+      req.onerror = function() { reject(req.error); };
+    });
+  }
+
+  function putToDB(db, value) {
     return new Promise(function(resolve, reject) {
       var tx = db.transaction(STORE_NAME, 'readwrite');
       var store = tx.objectStore(STORE_NAME);
-      var projects = [];
+      var req = store.put(value, STORE_KEY);
+      req.onsuccess = function() { resolve(); };
+      req.onerror = function() { reject(req.error); };
+    });
+  }
 
-      readFromIDB(store).then(function(existing) {
+  function saveViaIndexedDB(nodes, connections) {
+    return openDB().then(function(db) {
+      return getFromDB(db).then(function(existing) {
+        var projects = [];
         if (existing) {
           try {
-            var parsed = JSON.parse(existing);
+            var parsed = typeof existing === 'string' ? JSON.parse(existing) : existing;
             projects = parsed.state?.projects || [];
           } catch(e) {}
         }
         var newId = processProjects(projects, nodes, connections);
         var value = JSON.stringify({ state: { projects: projects }, version: 0 });
-        // 同步写 localStorage
-        try { localStorage.setItem(STORE_KEY, value); } catch {}
 
-        writeToIDB(store, value).then(function() {
-          // 验证
-          readFromIDB(store).then(function(verify) {
-            if (verify) resolve(newId);
-            else reject(new Error('verify failed'));
-          }).catch(function() { resolve(newId); });
-        }).catch(function(err) {
-          reject(err);
+        // 同步写入 localStorage 兜底
+        try { localStorage.setItem(STORE_KEY, value); } catch(e) {}
+
+        return putToDB(db, value).then(function() {
+          return newId;
         });
-      }).catch(function() {
-        // 读失败，直接新建
-        var newId = createNewProject(projects, nodes, connections);
-        var value = JSON.stringify({ state: { projects: projects }, version: 0 });
-        try { localStorage.setItem(STORE_KEY, value); } catch {}
-        writeToIDB(store, value).then(function() { resolve(newId); }).catch(reject);
       });
     });
   }
 
-  function fallbackToLocalStorage(nodes, connections) {
+  function saveViaLocalStorage(nodes, connections) {
     var projects = [];
     try {
       var raw = localStorage.getItem(STORE_KEY);
@@ -211,7 +190,6 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
   }
 
   async function run() {
-    // 1. 获取导入数据
     var res = await fetch(apiBase + '/api/import/get?token=' + encodeURIComponent(token));
     var data = await res.json();
     if (!data.success || !data.data) {
@@ -222,16 +200,16 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     var nodes = data.data.nodes || [];
     var connections = data.data.connections || [];
 
-    // 2. 先写 localStorage 兜底
-    var lsId = fallbackToLocalStorage(nodes, connections);
+    // 先写 localStorage 兜底
+    var lsId = saveViaLocalStorage(nodes, connections);
 
-    // 3. 再写 IndexedDB（localforage 兼容格式）
+    // 再写 IndexedDB（与 localforage 完全一致的格式）
     try {
       var idbId = await saveViaIndexedDB(nodes, connections);
       saveBinding(idbId);
       window.location.replace('/canvas/' + idbId);
     } catch(e) {
-      // IndexedDB 失败，用 localStorage 的 ID 跳转
+      // IndexedDB 失败，用 localStorage 的 ID
       saveBinding(lsId);
       window.location.replace('/canvas/' + lsId);
     }
