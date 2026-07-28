@@ -46,6 +46,8 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
   }
 
   var STORE_KEY = 'infinite-canvas:canvas_store';
+  var DB_NAME = 'infinite-canvas';
+  var STORE_NAME = 'app_state';
 
   function processProjects(projects, nodes, connections) {
     var newId;
@@ -84,6 +86,44 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     return newId;
   }
 
+  // 写 IndexedDB（与 localforage 完全一致的 store.put(value, key) 格式）
+  function writeIndexedDB(value) {
+    return new Promise(function(resolve, reject) {
+      var req = indexedDB.open(DB_NAME);
+      req.onupgradeneeded = function(e) {
+        var db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME);
+        }
+      };
+      req.onsuccess = function(e) {
+        var db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.close();
+          var upReq = indexedDB.open(DB_NAME, db.version + 1);
+          upReq.onupgradeneeded = function(ev) {
+            ev.target.result.createObjectStore(STORE_NAME);
+          };
+          upReq.onsuccess = function(ev) {
+            doWrite(ev.target.result, value, resolve, reject);
+          };
+          upReq.onerror = function() { resolve(); }; // 忽略，走 localStorage
+        } else {
+          doWrite(db, value, resolve, reject);
+        }
+      };
+      req.onerror = function() { resolve(); }; // 忽略，走 localStorage
+    });
+  }
+
+  function doWrite(db, value, resolve, reject) {
+    var tx = db.transaction(STORE_NAME, 'readwrite');
+    var store = tx.objectStore(STORE_NAME);
+    var putReq = store.put(value, STORE_KEY);
+    putReq.onsuccess = function() { resolve(); };
+    putReq.onerror = function() { resolve(); }; // 忽略，走 localStorage
+  }
+
   async function run() {
     var res = await fetch(apiBase + '/api/import/get?token=' + encodeURIComponent(token));
     var data = await res.json();
@@ -95,7 +135,7 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     var nodes = data.data.nodes || [];
     var connections = data.data.connections || [];
 
-    // 读取/写入 localStorage（canvas store 已加兜底读取）
+    // 先读 localStorage 已有项目
     var projects = [];
     try {
       var raw = localStorage.getItem(STORE_KEY);
@@ -107,6 +147,11 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
 
     var newId = processProjects(projects, nodes, connections);
     var value = JSON.stringify({ state: { projects: projects }, version: 0 });
+
+    // 写 IndexedDB（主存储，localforage 格式）
+    await writeIndexedDB(value);
+
+    // 写 localStorage（兜底）
     try { localStorage.setItem(STORE_KEY, value); } catch(e) {}
 
     // 保存绑定
@@ -118,7 +163,6 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
       }).catch(function() {});
     }
 
-    // 直接跳转到画布（canvas store 已加 localStorage 兜底）
     window.location.replace('/canvas/' + newId);
   }
 
