@@ -118,14 +118,8 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
       }).catch(function() {});
     }
 
-    // 通知父窗口（CanvasProxy.vue）跳转到画布
-    window.parent.postMessage({
-      type: 'canvas-import-done',
-      projectId: projectId,
-      canvasId: newId,
-    }, '*');
-
-    root.innerHTML = '<div class="loading"><div class="spinner"></div><div>导入完成，正在跳转...</div></div>';
+    // 直接跳转到画布（canvas store 已加 localStorage 兜底）
+    window.location.replace('/canvas/' + newId);
   }
 
   run().catch(function(err) {
