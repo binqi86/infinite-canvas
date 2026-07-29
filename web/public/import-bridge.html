@@ -116,8 +116,8 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
       }).catch(function() {});
     }
 
-    // 直接跳转顶层窗口到画布
-    window.top.location.href = 'http://localhost:3000/canvas/' + newId;
+    // 跳转到画布（canvas store 已优先读 localStorage）
+    window.location.replace('/canvas/' + newId);
   }
 
   run().catch(function(err) {
