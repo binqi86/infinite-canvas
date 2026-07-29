@@ -46,6 +46,8 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
   }
 
   var STORE_KEY = 'infinite-canvas:canvas_store';
+  var DB_NAME = 'infinite-canvas';
+  var STORE_NAME = 'app_state';
 
   function processProjects(projects, nodes, connections) {
     var newId;
@@ -95,6 +97,7 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     var nodes = data.data.nodes || [];
     var connections = data.data.connections || [];
 
+    // 读取已有项目
     var projects = [];
     try {
       var raw = localStorage.getItem(STORE_KEY);
@@ -106,8 +109,30 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
 
     var newId = processProjects(projects, nodes, connections);
     var value = JSON.stringify({ state: { projects: projects }, version: 0 });
+
+    // 写入 IndexedDB（与 localforage 一致的 store.put(value, key) 格式）
+    try {
+      var req = indexedDB.open(DB_NAME);
+      req.onupgradeneeded = function(e) {
+        if (!e.target.result.objectStoreNames.contains(STORE_NAME)) {
+          e.target.result.createObjectStore(STORE_NAME);
+        }
+      };
+      var db = await new Promise(function(resolve, reject) {
+        req.onsuccess = function(e) { resolve(e.target.result); };
+        req.onerror = function() { resolve(null); };
+      });
+      if (db) {
+        var tx = db.transaction(STORE_NAME, 'readwrite');
+        var store = tx.objectStore(STORE_NAME);
+        store.put(value, STORE_KEY);
+      }
+    } catch(e) {}
+
+    // 也写入 localStorage
     try { localStorage.setItem(STORE_KEY, value); } catch(e) {}
 
+    // 保存绑定
     if (!canvasId && projectId) {
       fetch(apiBase + '/api/import/bind', {
         method: 'POST',
@@ -116,7 +141,6 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
       }).catch(function() {});
     }
 
-    // 跳转到画布（canvas store 已优先读 localStorage）
     window.location.replace('/canvas/' + newId);
   }
 

@@ -9,15 +9,11 @@ localforage.config({
 export const localForageStorage: StateStorage = {
     getItem: async (name) => {
         if (typeof window === "undefined") return null;
-        // 先读 localStorage（import-bridge 等场景写入，速度最快）
-        const ls = window.localStorage.getItem(name);
-        if (ls) return ls;
-        // 再尝试 IndexedDB（主存储，异步较慢）
         try {
-            const value = await localforage.getItem<string>(name);
-            if (value) return value;
-        } catch {}
-        return null;
+            return (await localforage.getItem<string>(name)) || null;
+        } catch {
+            return window.localStorage.getItem(name);
+        }
     },
     setItem: async (name, value) => {
         if (typeof window === "undefined") return;
