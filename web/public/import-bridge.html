@@ -86,6 +86,55 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     return newId;
   }
 
+  // 从 IndexedDB 读取已有项目（与 localforage 一致）
+  function readFromIDB() {
+    return new Promise(function(resolve) {
+      var req = indexedDB.open(DB_NAME);
+      req.onupgradeneeded = function(e) {
+        if (!e.target.result.objectStoreNames.contains(STORE_NAME)) {
+          e.target.result.createObjectStore(STORE_NAME);
+        }
+      };
+      req.onsuccess = function(e) {
+        var db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.close();
+          resolve(null);
+          return;
+        }
+        var tx = db.transaction(STORE_NAME, 'readonly');
+        var store = tx.objectStore(STORE_NAME);
+        var getReq = store.get(STORE_KEY);
+        getReq.onsuccess = function() { resolve(getReq.result); };
+        getReq.onerror = function() { resolve(null); };
+      };
+      req.onerror = function() { resolve(null); };
+    });
+  }
+
+  // 写入 IndexedDB
+  function writeToIDB(value, callback) {
+    var req = indexedDB.open(DB_NAME);
+    req.onupgradeneeded = function(e) {
+      if (!e.target.result.objectStoreNames.contains(STORE_NAME)) {
+        e.target.result.createObjectStore(STORE_NAME);
+      }
+    };
+    req.onsuccess = function(e) {
+      var db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.close();
+        callback();
+        return;
+      }
+      var tx = db.transaction(STORE_NAME, 'readwrite');
+      var store = tx.objectStore(STORE_NAME);
+      store.put(value, STORE_KEY);
+      callback();
+    };
+    req.onerror = function() { callback(); };
+  }
+
   async function run() {
     var res = await fetch(apiBase + '/api/import/get?token=' + encodeURIComponent(token));
     var data = await res.json();
@@ -97,51 +146,35 @@ body { margin: 0; display: flex; align-items: center; justify-content: center; h
     var nodes = data.data.nodes || [];
     var connections = data.data.connections || [];
 
-    // 读取已有项目
+    // 从 IndexedDB 读取已有项目（与 canvas store 一致）
+    var raw = await readFromIDB();
     var projects = [];
-    try {
-      var raw = localStorage.getItem(STORE_KEY);
-      if (raw) {
-        var parsed = JSON.parse(raw);
+    if (raw) {
+      try {
+        var parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
         projects = parsed.state?.projects || [];
-      }
-    } catch(e) {}
+      } catch(e) {}
+    }
 
     var newId = processProjects(projects, nodes, connections);
     var value = JSON.stringify({ state: { projects: projects }, version: 0 });
 
-    // 写入 IndexedDB（与 localforage 一致的 store.put(value, key) 格式）
-    try {
-      var req = indexedDB.open(DB_NAME);
-      req.onupgradeneeded = function(e) {
-        if (!e.target.result.objectStoreNames.contains(STORE_NAME)) {
-          e.target.result.createObjectStore(STORE_NAME);
-        }
-      };
-      var db = await new Promise(function(resolve, reject) {
-        req.onsuccess = function(e) { resolve(e.target.result); };
-        req.onerror = function() { resolve(null); };
-      });
-      if (db) {
-        var tx = db.transaction(STORE_NAME, 'readwrite');
-        var store = tx.objectStore(STORE_NAME);
-        store.put(value, STORE_KEY);
+    // 写入 IndexedDB
+    writeToIDB(value, function() {
+      // 同步写入 localStorage 兜底
+      try { localStorage.setItem(STORE_KEY, value); } catch(e) {}
+
+      // 保存绑定
+      if (!canvasId && projectId) {
+        fetch(apiBase + '/api/import/bind', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
+        }).catch(function() {});
       }
-    } catch(e) {}
 
-    // 也写入 localStorage
-    try { localStorage.setItem(STORE_KEY, value); } catch(e) {}
-
-    // 保存绑定
-    if (!canvasId && projectId) {
-      fetch(apiBase + '/api/import/bind', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId: parseInt(projectId), canvasId: newId, canvasTitle: '画布导入' }),
-      }).catch(function() {});
-    }
-
-    window.location.replace('/canvas/' + newId);
+      window.location.replace('/canvas/' + newId);
+    });
   }
 
   run().catch(function(err) {
